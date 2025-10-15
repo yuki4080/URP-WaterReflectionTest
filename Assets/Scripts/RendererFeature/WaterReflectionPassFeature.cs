@@ -196,7 +196,10 @@ public class WaterReflectionPassFeature : ScriptableRendererFeature
 
             // レンダリング実行
             if (Settings.renderSkybox)
-                context.DrawSkybox(renderingData.cameraData.camera);
+            {
+                var skyboxRendererList = context.CreateSkyboxRendererList(renderingData.cameraData.camera);
+                cmd.DrawRendererList(skyboxRendererList);
+            }
             context.DrawRenderers(renderingData.cullResults, ref drawingSettings, ref _filteringSettings, ref _renderStateBlock);
 
             // 元に戻す
