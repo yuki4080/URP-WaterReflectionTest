@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering.Universal;
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RendererUtils;
 using UnityEngine.Rendering.Universal;
 
 public class WaterReflectionPassFeature : ScriptableRendererFeature
@@ -200,7 +201,9 @@ public class WaterReflectionPassFeature : ScriptableRendererFeature
                 var skyboxRendererList = context.CreateSkyboxRendererList(renderingData.cameraData.camera);
                 cmd.DrawRendererList(skyboxRendererList);
             }
-            context.DrawRenderers(renderingData.cullResults, ref drawingSettings, ref _filteringSettings, ref _renderStateBlock);
+            var rendererListParams = new RendererListParams(renderingData.cullResults, drawingSettings, _filteringSettings);
+            var rendererList = context.CreateRendererList(ref rendererListParams);
+            cmd.DrawRendererList(rendererList);
 
             // 元に戻す
             cmd.SetInvertCulling(false);
