@@ -46,6 +46,7 @@ ExportedObj/
 *.csproj
 *.unityproj
 *.sln
+*.slnx
 *.suo
 *.tmp
 *.user
@@ -81,6 +82,8 @@ crashlytics-build.properties
 
 # TestRunner generated files
 InitTestScene*.unity*
+/[Aa]ssets/ActualImages/
+/[Aa]ssets/ActualImages.meta
 
 # Addressables default ignores, before user customizations
 /ServerData
