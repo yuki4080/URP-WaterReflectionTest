@@ -1,12 +1,9 @@
 {
-    "name": "ReflectionRendererFeature.Tests",
+    "name": "WaterReflectionFeature",
     "rootNamespace": "",
     "references": [
-        "UnityEngine.TestRunner",
-        "UnityEngine.TestTools.Graphics",
         "Unity.RenderPipelines.Universal.Runtime",
-        "Unity.RenderPipelines.Core.Runtime",
-        "WaterReflectionFeature"
+        "Unity.RenderPipelines.Core.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
