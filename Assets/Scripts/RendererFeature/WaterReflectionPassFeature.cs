@@ -1,7 +1,20 @@
+/*
+ * Original Code: URP-WaterReflectionTest
+ * Author: rngtm
+ * Source: https://github.com/rngtm/URP-WaterReflectionTest
+ * Article: https://zenn.dev/r_ngtm/articles/urp-water-reflection
+ *
+ * Modified for Unity 6 RenderGraph by: yuki4080
+ * Repository: https://github.com/yuki4080/URP-WaterReflectionTest
+ * Description: Ported to Unity 6 RenderGraph API.
+ */
+
+using System;
 using System.Collections.Generic;
 using UnityEngine;
-
 using UnityEngine.Rendering;
+using UnityEngine.Rendering.RenderGraphModule;
+using UnityEngine.Rendering.RenderGraphModule.Util;
 using UnityEngine.Rendering.RendererUtils;
 using UnityEngine.Rendering.Universal;
 
@@ -9,12 +22,14 @@ public class WaterReflectionPassFeature : ScriptableRendererFeature
 {
     #region Fields
     [SerializeField] public Settings settings = new Settings();
-    private RenderReflectionObjectPass _renderObjectPass = null;
-    private MergeReflectionPass _mergeReflectionPass = null;
+    
+    private RenderReflectionObjectPass _renderObjectPass;
+    private MergeReflectionPass _mergeReflectionPass;
+    private RTHandle _reflectionHandle;
     #endregion
 
     // 設定
-    [System.Serializable]
+    [Serializable]
     public class Settings
     {
         // 水面の高さ (Y座標)
@@ -30,8 +45,8 @@ public class WaterReflectionPassFeature : ScriptableRendererFeature
         public RenderQueueType renderQueueType = RenderQueueType.Opaque;
 
         // 反射をレンダリングするタイミング
-        public RenderPassEvent renderObjectPassEvent = RenderPassEvent.AfterRenderingOpaques; 
-        
+        public RenderPassEvent renderObjectPassEvent = RenderPassEvent.BeforeRenderingOpaques;
+
         // レンダリング結果をフレームバッファへ合成するタイミング (デバッグ用)
         public RenderPassEvent debugPassEvent = RenderPassEvent.AfterRenderingTransparents;
 
@@ -44,52 +59,27 @@ public class WaterReflectionPassFeature : ScriptableRendererFeature
     public static class RenderTextureNames
     {
         public static string _CameraReflectionTexture = "_CameraReflectionTexture";
+        public static string _CameraReflectionDepthTexture = "_CameraReflectionDepthTexture";
     }
-    
+
     // シェーダープロパティIDの定義
     public static class ShaderPropertyIDs
     {
         public static readonly int _CameraReflectionTexture = Shader.PropertyToID(RenderTextureNames._CameraReflectionTexture);
-    }
-
-    // RenderTargetIdentifierの定義
-    public static class RenderTargetIdentifiers
-    {
-        public static readonly RenderTargetIdentifier _CameraReflectionTexture = ShaderPropertyIDs._CameraReflectionTexture;
-    }
-    
-    // RTHandleの置き場所
-    public static class RTHandlePool
-    {
-        public static RTHandle _CameraReflectionTexture;
+        public static readonly int _CameraReflectionDepthTexture = Shader.PropertyToID(RenderTextureNames._CameraReflectionDepthTexture);
     }
     #endregion
     
     #region RenderPass
 
     /// <summary>
-    /// 反射をフレームバッファへ合成するパス (デバッグ用)
-    /// </summary>
-    class MergeReflectionPass : ScriptableRenderPass
-    {
-        public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
-        {
-            var src = RenderTargetIdentifiers._CameraReflectionTexture;
-            var dst = renderingData.cameraData.renderer.cameraColorTargetHandle;
-            var cmd = CommandBufferPool.Get(nameof(MergeReflectionPass));
-            cmd.Blit(src, dst);
-            context.ExecuteCommandBuffer(cmd);
-            cmd.Clear();
-            CommandBufferPool.Release(cmd);
-        }
-    }
-    
-    /// <summary>
     /// 反射オブジェクトを描画するパス
     /// </summary>
     class RenderReflectionObjectPass : ScriptableRenderPass
     {
-        private readonly string k_ProfilerTag = nameof(RenderReflectionObjectPass); // Frame Debugger で表示される名前
+        private readonly string k_ProfilerTag = nameof(RenderReflectionObjectPass);
+        private WaterPlane _waterPlane;
+        private RTHandle _reflectionHandle;
         
         // レンダリング対象のShaderTag
         private List<ShaderTagId> m_ShaderTagIdList = new List<ShaderTagId> 
@@ -99,143 +89,192 @@ public class WaterReflectionPassFeature : ScriptableRendererFeature
             new ShaderTagId("UniversalForwardOnly"),
         };
 
-        private WaterPlane _waterPlane = null;
-        private FilteringSettings _filteringSettings;
-        private RenderStateBlock _renderStateBlock;
-        private LayerMask CullingMask => Settings.cullingMask;
-        private RenderQueueType RenderQueueType => Settings.renderQueueType;
-
         public Settings Settings { get; set; }
 
-        public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData)
+        public void Setup(RTHandle reflectionHandle)
         {
-            base.OnCameraSetup(cmd, ref renderingData);
-            RTHandlePool._CameraReflectionTexture = RTHandles.Alloc(RenderTargetIdentifiers._CameraReflectionTexture);
-        }
-        
-        public override void Configure(CommandBuffer cmd, RenderTextureDescriptor cameraTextureDescriptor)
-        {
-            base.Configure(cmd, cameraTextureDescriptor);
-            
-            // RenderTexture 確保 (使い終わったらReleaseTemporaryRTで解放)
-            cmd.GetTemporaryRT(ShaderPropertyIDs._CameraReflectionTexture, cameraTextureDescriptor);
-            
-            // レンダリング先の変更
-            ConfigureTarget(RTHandlePool._CameraReflectionTexture);
-            
-            // 描画クリア
-            ConfigureClear(ClearFlag.All, Color.black);
+            _reflectionHandle = reflectionHandle;
         }
 
-        public override void OnCameraCleanup(CommandBuffer cmd)
+        class PassData
         {
-            base.OnCameraCleanup(cmd);
-            
-            // 確保したRenderTextureを解放
-            cmd.ReleaseTemporaryRT(ShaderPropertyIDs._CameraReflectionTexture);
-            
-            RTHandles.Release(RTHandlePool._CameraReflectionTexture);
+            public RendererListHandle RendererList;
+            public RendererListHandle SkyboxRendererList;
+            public Matrix4x4 ViewMatrix;
+            public Matrix4x4 ProjectionMatrix;
+            public Matrix4x4 DefaultViewMatrix;
+            public bool RenderSkybox;
         }
-        
-        public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
+
+        public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
-            if (_waterPlane == null)
-            {
-                _waterPlane = WaterPlane.Instance;
-            }
+            if (_reflectionHandle == null || _reflectionHandle.rt == null) return;
 
-            if (_waterPlane != null)
-            {
-                Settings.waterY = _waterPlane.WaterY;
-            }
+            var cameraData = frameData.Get<UniversalCameraData>();
+            var renderingData = frameData.Get<UniversalRenderingData>();
+
+            if (_waterPlane == null) _waterPlane = WaterPlane.Instance;
+            if (_waterPlane != null) Settings.waterY = _waterPlane.WaterY;
+
+            // RenderTexture確保
+            TextureHandle reflectionColor = renderGraph.ImportTexture(_reflectionHandle);
+
+            // デプスバッファ用の一時テクスチャ作成
+            var targetDesc = cameraData.cameraTargetDescriptor;
+            var depthDesc = new TextureDesc(targetDesc.width, targetDesc.height);
+            depthDesc.colorFormat = UnityEngine.Experimental.Rendering.GraphicsFormat.None;
+            depthDesc.depthBufferBits = DepthBits.Depth32;
+            depthDesc.msaaSamples = (MSAASamples)targetDesc.msaaSamples;
+            depthDesc.name = "_CameraReflectionDepth";
             
-            // レンダリング対象とするRenderQueue
-            RenderQueueRange renderQueueRange = (RenderQueueType == RenderQueueType.Transparent)
-                ? RenderQueueRange.transparent
-                : RenderQueueRange.opaque;
+            TextureHandle reflectionDepth = renderGraph.CreateTexture(depthDesc);
 
-            // フィルタリング設定
-            _filteringSettings = new FilteringSettings(renderQueueRange, CullingMask);
-
-            // オブジェクトのソート設定
-            var sortingCriteria = (RenderQueueType == RenderQueueType.Transparent)
-                ? SortingCriteria.CommonTransparent
-                : renderingData.cameraData.defaultOpaqueSortFlags;
-
-            // 描画 設定
-            var drawingSettings = CreateDrawingSettings(
-                m_ShaderTagIdList,
-                ref renderingData,
-                sortingCriteria);
-            var cameraData = renderingData.cameraData;
-            var defaultViewMatrix = cameraData.GetViewMatrix();
             var viewMatrix = cameraData.GetViewMatrix();
+            var defaultViewMatrix = viewMatrix;
             
             // Y座標をwaterYだけ平行移動する行列
             var translateMat = Matrix4x4.identity;
-            translateMat.m13 = -Settings.waterY; 
+            translateMat.m13 = -Settings.waterY;
             
             // Y軸反転する行列
             var reverseMat = Matrix4x4.identity;
             reverseMat.m11 = -reverseMat.m11;
             
-            var projectionMatrix = cameraData.GetProjectionMatrix();
-            projectionMatrix =
-                GL.GetGPUProjectionMatrix(projectionMatrix, cameraData.IsCameraProjectionMatrixFlipped());
-            
-            // コマンドバッファの確保 (使い終わったらCommandBufferPool.Releaseで解放する)
-            var cmd = CommandBufferPool.Get(k_ProfilerTag);
-            
             // 水面反転を行うように、View行列を加工する
             // 変換後の頂点座標 = P * V * Reverse * Translate * M * 頂点座標
-            viewMatrix = viewMatrix * reverseMat * translateMat; 
-            RenderingUtils.SetViewAndProjectionMatrices(cmd, viewMatrix, projectionMatrix, false);
-            
-            cmd.SetInvertCulling(true); // カリング反転 (ビュー行列を反転すると、メッシュの表・裏が逆転するため)
-            context.ExecuteCommandBuffer(cmd);
-            cmd.Clear();
+            viewMatrix = viewMatrix * reverseMat * translateMat;
 
-            // レンダリング実行
-            if (Settings.renderSkybox)
+            var projectionMatrix = cameraData.GetProjectionMatrix();
+            projectionMatrix = GL.GetGPUProjectionMatrix(projectionMatrix, true);
+
+            // RendererList作成
+            // レンダリング対象とするRenderQueue
+            var renderQueueRange = (Settings.renderQueueType == RenderQueueType.Transparent)
+                ? RenderQueueRange.transparent
+                : RenderQueueRange.opaque;
+            
+            // フィルタリング設定
+            var filterSettings = new FilteringSettings(renderQueueRange, Settings.cullingMask);
+
+            // オブジェクトのソート設定
+            var sortFlags = (Settings.renderQueueType == RenderQueueType.Transparent)
+                ? SortingCriteria.CommonTransparent
+                : cameraData.defaultOpaqueSortFlags;
+
+            // 描画設定
+            var drawSettings = new DrawingSettings(m_ShaderTagIdList[0], new SortingSettings(cameraData.camera) { criteria = sortFlags });
+            for (int i = 1; i < m_ShaderTagIdList.Count; i++) drawSettings.SetShaderPassName(i, m_ShaderTagIdList[i]);
+            
+            var rendererListParams = new RendererListParams(renderingData.cullResults, drawSettings, filterSettings);
+            RendererListHandle rendererList = renderGraph.CreateRendererList(rendererListParams);
+
+            RendererListHandle skyboxList = new RendererListHandle();
+            if (Settings.renderSkybox) skyboxList = renderGraph.CreateSkyboxRendererList(cameraData.camera);
+
+            using (var builder = renderGraph.AddRasterRenderPass<PassData>(k_ProfilerTag, out var passData))
             {
-                var skyboxRendererList = context.CreateSkyboxRendererList(renderingData.cameraData.camera);
-                cmd.DrawRendererList(skyboxRendererList);
-            }
-            var rendererListParams = new RendererListParams(renderingData.cullResults, drawingSettings, _filteringSettings);
-            var rendererList = context.CreateRendererList(ref rendererListParams);
-            cmd.DrawRendererList(rendererList);
+                passData.RendererList = rendererList;
+                passData.SkyboxRendererList = skyboxList;
+                passData.ViewMatrix = viewMatrix;
+                passData.ProjectionMatrix = projectionMatrix;
+                passData.DefaultViewMatrix = defaultViewMatrix;
+                passData.RenderSkybox = Settings.renderSkybox;
 
-            // 元に戻す
-            cmd.SetInvertCulling(false);
-            RenderingUtils.SetViewAndProjectionMatrices(cmd, defaultViewMatrix, projectionMatrix, false);
-            context.ExecuteCommandBuffer(cmd);
-            cmd.Clear();
-            
-            // コマンドバッファ解放
-            CommandBufferPool.Release(cmd);
+                // レンダリング先の変更
+                builder.SetRenderAttachment(reflectionColor, 0, AccessFlags.Write);
+                builder.SetRenderAttachmentDepth(reflectionDepth, AccessFlags.Write);
+                
+                builder.UseRendererList(rendererList);
+                if (Settings.renderSkybox) builder.UseRendererList(skyboxList);
+
+                builder.AllowGlobalStateModification(true);
+                builder.SetGlobalTextureAfterPass(reflectionColor, ShaderPropertyIDs._CameraReflectionTexture);
+                builder.SetGlobalTextureAfterPass(reflectionDepth, ShaderPropertyIDs._CameraReflectionDepthTexture);
+
+                builder.SetRenderFunc((PassData data, RasterGraphContext context) =>
+                {
+                    var cmd = context.cmd;
+                    
+                    RenderingUtils.SetViewAndProjectionMatrices(cmd, data.ViewMatrix, data.ProjectionMatrix, false);
+                    
+                    // カリング反転 (ビュー行列を反転すると、メッシュの表・裏が逆転するため)
+                    cmd.SetInvertCulling(true);
+                    
+                    // 描画クリア
+                    cmd.ClearRenderTarget(true, true, Color.black);
+
+                    // レンダリング実行
+                    if (data.RenderSkybox) cmd.DrawRendererList(data.SkyboxRendererList);
+                    cmd.DrawRendererList(data.RendererList);
+
+                    // 元に戻す
+                    cmd.SetInvertCulling(false);
+                    RenderingUtils.SetViewAndProjectionMatrices(cmd, data.DefaultViewMatrix, data.ProjectionMatrix, false);
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// 反射をフレームバッファへ合成するパス (デバッグ用)
+    /// </summary>
+    class MergeReflectionPass : ScriptableRenderPass
+    {
+        private readonly string k_ProfilerTag = nameof(MergeReflectionPass);
+        private RTHandle _reflectionHandle;
+
+        public void Setup(RTHandle reflectionHandle)
+        {
+            _reflectionHandle = reflectionHandle;
+        }
+
+        public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+        {
+            if (_reflectionHandle == null || _reflectionHandle.rt == null) return;
+
+            var resourceData = frameData.Get<UniversalResourceData>();
+            TextureHandle activeColor = resourceData.activeColorTexture;
+            TextureHandle sourceTexture = renderGraph.ImportTexture(_reflectionHandle);
+
+            renderGraph.AddBlitPass(sourceTexture, activeColor, Vector2.one, Vector2.zero, passName: k_ProfilerTag);
         }
     }
     #endregion
 
     public override void Create()
     {
-        RTHandles.Initialize(Screen.width, Screen.height);
-        
         // Render Pass 作成
         _renderObjectPass = new RenderReflectionObjectPass();
         _renderObjectPass.Settings = settings;
         _renderObjectPass.renderPassEvent = settings.renderObjectPassEvent;
-        
+
         _mergeReflectionPass = new MergeReflectionPass();
         _mergeReflectionPass.renderPassEvent = settings.debugPassEvent;
-
     }
 
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
+        var cameraData = renderingData.cameraData;
+        var desc = cameraData.cameraTargetDescriptor;
+        desc.depthBufferBits = 0; 
+        
+        // RTHandle 確保
+        RenderingUtils.ReAllocateHandleIfNeeded(ref _reflectionHandle, desc, name: RenderTextureNames._CameraReflectionTexture);
+
+        _renderObjectPass.Setup(_reflectionHandle);
         renderer.EnqueuePass(_renderObjectPass);
 
         if (settings.debugReflection)
+        {
+            _mergeReflectionPass.Setup(_reflectionHandle);
             renderer.EnqueuePass(_mergeReflectionPass);
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        // 確保したRTHandleを解放
+        _reflectionHandle?.Release();
+        _reflectionHandle = null;
     }
 }
