@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.Experimental.Rendering.Universal;
+
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RendererUtils;
 using UnityEngine.Rendering.Universal;
@@ -8,7 +8,7 @@ using UnityEngine.Rendering.Universal;
 public class WaterReflectionPassFeature : ScriptableRendererFeature
 {
     #region Fields
-    [SerializeField] private Settings settings = new Settings();
+    [SerializeField] public Settings settings = new Settings();
     private RenderReflectionObjectPass _renderObjectPass = null;
     private MergeReflectionPass _mergeReflectionPass = null;
     #endregion
